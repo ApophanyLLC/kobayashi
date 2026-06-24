@@ -8,6 +8,7 @@ captured-*.md
 database-analysis*.md
 adversarial-*.md
 database-analysis-work/
+adversarial-database-analysis-work/
 
 # --- Python ---
 __pycache__/

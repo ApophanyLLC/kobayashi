@@ -25,6 +25,7 @@ python3 -m kobayashi captured adversarial-report --thread-id THREAD_ID
 python3 -m kobayashi captured adversarial-report --all -o adversarial-report.md
 python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
 python3 -m kobayashi captured adversarial-analyze --all -o adversarial-analysis.md
+python3 -m kobayashi captured adversarial-analyze-db --full --output-dir adversarial-database-analysis-work -o adversarial-database-analysis-full.md
 python3 -m kobayashi captured summary --thread-id THREAD_ID
 python3 -m kobayashi captured patches --thread-id THREAD_ID --full
 python3 -m kobayashi captured inputs --thread-id THREAD_ID --full
@@ -61,6 +62,13 @@ adversary-perspective analysis. Use `--thread-id` for one thread, `--max-threads
 for a timestamp-ordered subset, or `--all` for the full database. Omitting all
 three scope flags also analyzes all threads.
 
+Use `captured adversarial-analyze-db --full` for the slow, full-content
+adversarial equivalent of `captured analyze-db --full`: it sends exact
+per-thread captured content to the local LLM, summarizes adversarial per-thread
+analyses in batches, and produces a database-wide adversarial synthesis. Use
+`--output-dir` for checkpointing and resume; this command can make many local
+model calls.
+
 ## Optional Local LLM Setup
 
 The LLM-backed commands are optional. All deterministic commands work without a
@@ -93,6 +101,13 @@ python3 -m kobayashi captured adversarial-analyze \
   --model MODEL_NAME \
   --thread-id THREAD_ID \
   -o adversarial-analysis.md
+
+python3 -m kobayashi captured adversarial-analyze-db \
+  --provider ollama \
+  --model MODEL_NAME \
+  --full \
+  --output-dir adversarial-database-analysis-work \
+  -o adversarial-database-analysis-full.md
 ```
 
 If `--model` is omitted, Kobayashi tries to discover the first locally available
@@ -114,6 +129,7 @@ Kobayashi defaults to the llama.cpp/OpenAI-compatible URL
 ```bash
 python3 -m kobayashi captured analyze --thread-id THREAD_ID -o captured-analysis.md
 python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
+python3 -m kobayashi captured adversarial-analyze-db --full --output-dir adversarial-database-analysis-work -o adversarial-database-analysis-full.md
 ```
 
 For large `--full` reports, increase `--timeout`, reduce `--chunk-chars`, or

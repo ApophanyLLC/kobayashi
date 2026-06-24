@@ -415,6 +415,7 @@ def test_llm_url_guard_allows_loopback_and_rejects_remote():
         ["analyze", "--thread-id", "thread-one"],
         ["analyze-db", "--max-threads", "1"],
         ["adversarial-analyze", "--thread-id", "thread-one"],
+        ["adversarial-analyze-db", "--max-threads", "1"],
     ],
 )
 def test_llm_commands_reject_remote_base_url_before_model_discovery(
@@ -578,6 +579,115 @@ def test_captured_analyze_db_reuses_output_dir_checkpoints(tmp_path, monkeypatch
     assert "thread 2 of 2" in prompts[0]
     assert "synthesizing batch 2" in prompts[1]
     assert "comprehensive database-wide" in prompts[2]
+
+
+def test_captured_adversarial_analyze_db_uses_local_llm_for_threads_batches_and_final(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "logs.sqlite"
+    output = tmp_path / "adversarial-database-analysis.md"
+    make_db(db)
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return f"fake adversarial analysis {len(prompts)}"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    assert main(
+        [
+            "--db",
+            str(db),
+            "captured",
+            "adversarial-analyze-db",
+            "--max-threads",
+            "2",
+            "--batch-size",
+            "1",
+            "--limit-per-section",
+            "1",
+            "-o",
+            str(output),
+        ]
+    ) == 0
+
+    assert "Wrote" in capsys.readouterr().out
+    text = output.read_text()
+    assert "# Database-Wide Full-Content Adversarial Analysis" in text
+    assert "fake adversarial analysis" in text
+    assert "thread-one" in text
+    assert "Rows in analyzed threads: `5`" in text
+    assert len(prompts) == 5
+    assert "hostile analyst reviewing thread 1 of 2" in prompts[0]
+    assert "adversarial full-content analyses for batch 1" in prompts[2]
+    assert "database-wide adversarial reconstruction" in prompts[-1]
+
+
+def test_captured_adversarial_analyze_db_reuses_output_dir_checkpoints(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db = tmp_path / "logs.sqlite"
+    output = tmp_path / "adversarial-database-analysis.md"
+    output_dir = tmp_path / "adversarial-database-analysis-work"
+    output_dir.mkdir()
+    make_db(db)
+    first_stem = f"0001-{cli.safe_filename(cli.short_id('thread-one'))}"
+    second_stem = f"0002-{cli.safe_filename(cli.short_id('thread-two'))}"
+    (output_dir / f"{first_stem}-adversarial-analysis.md").write_text(
+        "saved adversarial thread-one analysis",
+        encoding="utf-8",
+    )
+    (output_dir / "adversarial-batch-0001-summary.md").write_text(
+        "saved adversarial batch one",
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return f"fresh adversarial analysis {len(prompts)}"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    assert main(
+        [
+            "--db",
+            str(db),
+            "captured",
+            "adversarial-analyze-db",
+            "--max-threads",
+            "2",
+            "--batch-size",
+            "1",
+            "--limit-per-section",
+            "1",
+            "--output-dir",
+            str(output_dir),
+            "-o",
+            str(output),
+        ]
+    ) == 0
+
+    stderr = capsys.readouterr().err
+    text = output.read_text()
+    assert "Reusing adversarial thread 1/2" in stderr
+    assert "Reusing adversarial batch 1" in stderr
+    assert "saved adversarial thread-one analysis" in text
+    assert (output_dir / f"{second_stem}-report.md").exists()
+    assert (output_dir / f"{second_stem}-adversarial-analysis.md").exists()
+    assert len(prompts) == 3
+    assert "hostile analyst reviewing thread 2 of 2" in prompts[0]
+    assert "adversarial full-content analyses for batch 2" in prompts[1]
+    assert "database-wide adversarial reconstruction" in prompts[2]
 
 
 def test_analyze_report_chunks_large_reports(monkeypatch):
