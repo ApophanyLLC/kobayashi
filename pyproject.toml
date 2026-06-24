@@ -3,6 +3,10 @@ name = "kobayashi"
 version = "0.1.0"
 description = "A playful read-only CLI for exploring Codex logs_2.sqlite"
 requires-python = ">=3.11"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
 dependencies = []
 
 [project.scripts]

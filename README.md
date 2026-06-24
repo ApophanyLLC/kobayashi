@@ -46,6 +46,12 @@ database-wide Markdown report. This can make many local model calls; use
 Large `--full` reports are automatically chunked before they are sent to the
 local LLM; tune that with `--chunk-chars` if your server rejects large prompts.
 
+## License
+
+Kobayashi is released under the Apache License, Version 2.0. Redistributions and
+derived products must preserve the attribution notice in `NOTICE` as required by
+that license.
+
 ## Disclaimer
 
 This software is provided "as is", without warranty of any kind, express or
