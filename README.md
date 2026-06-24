@@ -19,6 +19,8 @@ python3 -m kobayashi captured analyze --thread-id THREAD_ID -o captured-analysis
 python3 -m kobayashi captured analyze --thread-id THREAD_ID --full --model MODEL_NAME -o captured-analysis-full.md
 python3 -m kobayashi captured analyze-db -o database-analysis.md
 python3 -m kobayashi captured analyze-db --full --output-dir database-analysis-work -o database-analysis-full.md
+python3 -m kobayashi captured adversarial-report --thread-id THREAD_ID
+python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
 python3 -m kobayashi captured summary --thread-id THREAD_ID
 python3 -m kobayashi captured patches --thread-id THREAD_ID --full
 python3 -m kobayashi captured inputs --thread-id THREAD_ID --full
@@ -45,6 +47,68 @@ database-wide Markdown report. This can make many local model calls; use
 `--max-threads` for a smoke test and `--output-dir` to keep per-thread artifacts.
 Large `--full` reports are automatically chunked before they are sent to the
 local LLM; tune that with `--chunk-chars` if your server rejects large prompts.
+
+Use `captured adversarial-report` for a deterministic report showing what an
+adversarial reader could infer from the database. Use `captured
+adversarial-analyze` to send that evidence report to a local LLM for a fuller
+adversary-perspective analysis.
+
+## Optional Local LLM Setup
+
+The LLM-backed commands are optional. All deterministic commands work without a
+local model. Keep local model servers bound to `127.0.0.1` or `localhost`;
+captured reports may contain private prompts, file paths, patches, and tool
+arguments.
+
+### Ollama
+
+Install Ollama, pull a chat/instruct model that fits your machine, and confirm
+the local API can list models:
+
+```bash
+ollama pull MODEL_NAME
+curl http://localhost:11434/api/tags
+```
+
+Then run an LLM-backed report with the Ollama provider:
+
+```bash
+python3 -m kobayashi captured analyze \
+  --provider ollama \
+  --model MODEL_NAME \
+  --thread-id THREAD_ID \
+  -o captured-analysis.md
+
+python3 -m kobayashi captured adversarial-analyze \
+  --provider ollama \
+  --model MODEL_NAME \
+  --thread-id THREAD_ID \
+  -o adversarial-analysis.md
+```
+
+If `--model` is omitted, Kobayashi tries to discover the first locally available
+model from Ollama.
+
+### llama.cpp server
+
+Build or install `llama-server`, download a compatible GGUF model, and start the
+server on the default localhost port:
+
+```bash
+llama-server -m /path/to/model.gguf -c 8192
+curl http://127.0.0.1:8080/v1/models
+```
+
+Kobayashi defaults to the llama.cpp/OpenAI-compatible URL
+`http://127.0.0.1:8080/v1`, so this usually works without extra provider flags:
+
+```bash
+python3 -m kobayashi captured analyze --thread-id THREAD_ID -o captured-analysis.md
+python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
+```
+
+For large `--full` reports, increase `--timeout`, reduce `--chunk-chars`, or
+omit `--full` if the local server times out or rejects a prompt.
 
 ## License
 
