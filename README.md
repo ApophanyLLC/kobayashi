@@ -3,6 +3,8 @@
 A small, dependency-free CLI for exploring Codex's local
 `~/.codex/logs_2.sqlite` database in read-only mode.
 
+Kobayashi is not affiliated with, endorsed by, or sponsored by OpenAI.
+
 ```bash
 python3 -m kobayashi
 python3 -m kobayashi heatmap --days 10
