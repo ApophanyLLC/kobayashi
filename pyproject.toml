@@ -1,0 +1,16 @@
+[project]
+name = "kobayashi"
+version = "0.1.0"
+description = "A playful read-only CLI for exploring Codex logs_2.sqlite"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+kobayashi = "kobayashi.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
