@@ -1,0 +1,36 @@
+# --- Kobayashi output (may contain private prompts, paths, patches) ---
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+captured-*.md
+*-analysis.md
+*-analysis-full.md
+database-analysis*.md
+adversarial-*.md
+database-analysis-work/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
