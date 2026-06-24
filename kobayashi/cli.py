@@ -341,6 +341,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     captured_adversarial.add_argument("--thread-id", help="Thread ID or shortened thread ID.")
     captured_adversarial.add_argument(
+        "--all",
+        action="store_true",
+        help="Analyze all threads explicitly. This is the default when no scope is provided.",
+    )
+    captured_adversarial.add_argument(
         "--max-threads",
         type=positive_int,
         help="Analyze only the first N threads in timestamp order.",
@@ -364,6 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use a local LLM to write an adversary-perspective reconstruction report.",
     )
     captured_adversarial_analyze.add_argument("--thread-id", help="Thread ID or shortened thread ID.")
+    captured_adversarial_analyze.add_argument(
+        "--all",
+        action="store_true",
+        help="Analyze all threads explicitly. This is the default when no scope is provided.",
+    )
     captured_adversarial_analyze.add_argument(
         "--provider",
         choices=("ollama", "openai-compatible", "llama.cpp"),
@@ -1035,7 +1045,7 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
 
 
 def captured_adversarial_report_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
-    thread_id = resolve_optional_thread_id(conn, args.thread_id)
+    thread_id = resolve_adversarial_scope(conn, args)
     report = build_adversarial_report(
         conn,
         thread_id=thread_id,
@@ -1051,7 +1061,7 @@ def captured_adversarial_report_cmd(conn: sqlite3.Connection, args: argparse.Nam
 
 
 def captured_adversarial_analyze_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
-    thread_id = resolve_optional_thread_id(conn, args.thread_id)
+    thread_id = resolve_adversarial_scope(conn, args)
     evidence_report = build_adversarial_report(
         conn,
         thread_id=thread_id,
@@ -2466,6 +2476,14 @@ def resolve_optional_thread_id(conn: sqlite3.Connection, value: str | None) -> s
     if thread_id is None:
         raise SystemExit(f"No thread found matching {value}.")
     return thread_id
+
+
+def resolve_adversarial_scope(conn: sqlite3.Connection, args: argparse.Namespace) -> str | None:
+    if args.all and args.thread_id:
+        raise SystemExit("--all cannot be used with --thread-id.")
+    if args.all and args.max_threads is not None:
+        raise SystemExit("--all cannot be used with --max-threads.")
+    return resolve_optional_thread_id(conn, args.thread_id)
 
 
 def thread_filter(thread_id: str | None) -> tuple[str, list[object]]:

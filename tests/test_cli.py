@@ -270,6 +270,17 @@ def test_captured_adversarial_report_writes_markdown_file(tmp_path, capsys):
     assert "Prompt And Conversation Evidence" in text
 
 
+def test_captured_adversarial_report_all_scope_is_explicit(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+
+    assert main(["--db", str(db), "captured", "adversarial-report", "--all"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Scope: `all threads`" in out
+    assert "Threads analyzed: `3`" in out
+
+
 def test_extract_commit_message_from_command():
     message = cli.extract_commit_message("git commit -m 'feat: add demo report'")
 
@@ -312,6 +323,42 @@ def test_captured_adversarial_analyze_uses_local_llm(tmp_path, monkeypatch, caps
     assert "simulating a hostile analyst" in prompts[0]
     assert "EVIDENCE REPORT START" in prompts[0]
     assert "Do not invent facts" in prompts[0]
+
+
+def test_captured_adversarial_analyze_all_uses_full_database_scope(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return "fake all-db adversarial report"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    assert main(["--db", str(db), "captured", "adversarial-analyze", "--all"]) == 0
+
+    out = capsys.readouterr().out
+    assert "fake all-db adversarial report" in out
+    assert len(prompts) == 1
+    assert "Scope: `all threads`" in prompts[0]
+    assert "Threads analyzed: `3`" in prompts[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["adversarial-report", "adversarial-analyze"],
+)
+def test_captured_adversarial_scope_flags_are_exclusive(tmp_path, command):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "captured", command, "--all", "--thread-id", "thread-one"])
+
+    assert str(exc_info.value) == "--all cannot be used with --thread-id."
 
 
 def test_adversarial_analysis_chunks_large_reports(monkeypatch):

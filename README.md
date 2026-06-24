@@ -22,7 +22,9 @@ python3 -m kobayashi captured analyze --thread-id THREAD_ID --full --model MODEL
 python3 -m kobayashi captured analyze-db -o database-analysis.md
 python3 -m kobayashi captured analyze-db --full --output-dir database-analysis-work -o database-analysis-full.md
 python3 -m kobayashi captured adversarial-report --thread-id THREAD_ID
+python3 -m kobayashi captured adversarial-report --all -o adversarial-report.md
 python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
+python3 -m kobayashi captured adversarial-analyze --all -o adversarial-analysis.md
 python3 -m kobayashi captured summary --thread-id THREAD_ID
 python3 -m kobayashi captured patches --thread-id THREAD_ID --full
 python3 -m kobayashi captured inputs --thread-id THREAD_ID --full
@@ -55,7 +57,9 @@ LLM; tune that with `--chunk-chars` if your server rejects large prompts.
 Use `captured adversarial-report` for a deterministic report showing what an
 adversarial reader could infer from the database. Use `captured
 adversarial-analyze` to send that evidence report to a local LLM for a fuller
-adversary-perspective analysis.
+adversary-perspective analysis. Use `--thread-id` for one thread, `--max-threads`
+for a timestamp-ordered subset, or `--all` for the full database. Omitting all
+three scope flags also analyzes all threads.
 
 ## Optional Local LLM Setup
 
