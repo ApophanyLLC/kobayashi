@@ -274,6 +274,69 @@ def test_extract_commit_message_from_command():
     assert message == "feat: add demo report"
 
 
+def test_captured_adversarial_analyze_uses_local_llm(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "logs.sqlite"
+    output = tmp_path / "llm-adversarial.md"
+    make_db(db)
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return "fake adversarial intelligence report"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    assert main(
+        [
+            "--db",
+            str(db),
+            "captured",
+            "adversarial-analyze",
+            "--thread-id",
+            "thread-one",
+            "-o",
+            str(output),
+        ]
+    ) == 0
+
+    assert "Wrote" in capsys.readouterr().out
+    text = output.read_text()
+    assert "# LLM-Backed Adversarial Reconstruction Report" in text
+    assert "fake adversarial intelligence report" in text
+    assert "# Adversarial Reconstruction Report" in text
+    assert len(prompts) == 1
+    assert "simulating a hostile analyst" in prompts[0]
+    assert "EVIDENCE REPORT START" in prompts[0]
+    assert "Do not invent facts" in prompts[0]
+
+
+def test_adversarial_analysis_chunks_large_reports(monkeypatch):
+    prompts: list[str] = []
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return f"adversarial analysis {len(prompts)}"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    result = cli.analyze_adversarial_report_with_local_llm(
+        provider="llama.cpp",
+        url="http://127.0.0.1:8080/v1",
+        model="fake-model",
+        report="evidence line\n" * 50,
+        label="thread-test",
+        chunk_chars=120,
+        timeout=1,
+    )
+
+    assert result == f"adversarial analysis {len(prompts)}"
+    assert len(prompts) > 2
+    assert "EVIDENCE CHUNK START" in prompts[0]
+    assert "synthesizing adversarial reconstruction" in prompts[-1]
+
+
 def test_analysis_prompt_wraps_report_as_untrusted_evidence():
     prompt = build_analysis_prompt("# Report\n\nsecret-ish stuff")
 
