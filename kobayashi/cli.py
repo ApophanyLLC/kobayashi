@@ -234,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     captured_analyze.add_argument(
         "--chunk-chars",
         type=positive_int,
-        default=120_000,
+        default=60_000,
         help="Split reports larger than this many characters before sending to the LLM.",
     )
     captured_analyze.add_argument(
@@ -243,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Write the LLM analysis Markdown to this file.",
     )
-    captured_analyze.add_argument("--timeout", type=positive_int, default=120)
+    captured_analyze.add_argument("--timeout", type=positive_int, default=300)
     captured_analyze.set_defaults(func=captured_analyze_cmd)
 
     captured_analyze_db = captured_subparsers.add_parser(
@@ -281,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     captured_analyze_db.add_argument(
         "--chunk-chars",
         type=positive_int,
-        default=120_000,
+        default=60_000,
         help="Split per-thread reports larger than this many characters before sending to the LLM.",
     )
     captured_analyze_db.add_argument(
@@ -300,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional directory for per-thread reports, per-thread analyses, and batch summaries.",
     )
-    captured_analyze_db.add_argument("--timeout", type=positive_int, default=120)
+    captured_analyze_db.add_argument("--timeout", type=positive_int, default=300)
     captured_analyze_db.set_defaults(func=captured_analyze_db_cmd)
 
     vibe_parser = subparsers.add_parser("vibes", help="Summarize the log stream with flavor.")
@@ -1036,7 +1036,13 @@ def analyze_report_with_local_llm(
 
     chunks = split_text_for_llm(report, chunk_chars)
     chunk_analyses: list[str] = []
+    print(
+        f"Chunking {label} into {len(chunks)} local LLM requests "
+        f"({len(report):,} chars, chunk size {chunk_chars:,})",
+        file=sys.stderr,
+    )
     for index, chunk in enumerate(chunks, start=1):
+        print(f"Analyzing chunk {index}/{len(chunks)} for {label}", file=sys.stderr)
         chunk_prompt = build_report_chunk_prompt(
             chunk,
             label=label,
@@ -1054,6 +1060,7 @@ def analyze_report_with_local_llm(
         )
 
     synthesis_prompt = build_report_chunk_synthesis_prompt(label, chunk_analyses)
+    print(f"Synthesizing chunk analyses for {label}", file=sys.stderr)
     return call_local_llm(
         provider=provider,
         url=url,
@@ -1373,6 +1380,8 @@ def get_json(endpoint: str, timeout: int) -> dict[str, Any]:
         raise RuntimeError(http_error_message(exc)) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(str(exc)) from exc
+    except TimeoutError as exc:
+        raise RuntimeError(timeout_message(endpoint, timeout)) from exc
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -1397,6 +1406,8 @@ def post_json(endpoint: str, body: dict[str, Any], timeout: int) -> dict[str, An
         raise RuntimeError(http_error_message(exc)) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(str(exc)) from exc
+    except TimeoutError as exc:
+        raise RuntimeError(timeout_message(endpoint, timeout)) from exc
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -1415,6 +1426,13 @@ def http_error_message(exc: urllib.error.HTTPError) -> str:
     if body:
         detail += f" - {body[:500]}"
     return detail
+
+
+def timeout_message(endpoint: str, timeout: int) -> str:
+    return (
+        f"request to {endpoint} timed out after {timeout}s. "
+        "Try a larger --timeout, a smaller --chunk-chars, or run without --full."
+    )
 
 
 def vibes(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
