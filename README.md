@@ -45,3 +45,19 @@ database-wide Markdown report. This can make many local model calls; use
 `--max-threads` for a smoke test and `--output-dir` to keep per-thread artifacts.
 Large `--full` reports are automatically chunked before they are sent to the
 local LLM; tune that with `--chunk-chars` if your server rejects large prompts.
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to warranties of correctness, reliability,
+merchantability, fitness for a particular purpose, or non-infringement. The
+authors and contributors make no guarantees about the accuracy, completeness, or
+suitability of any output, report, analysis, classification, or recommendation
+produced by this software.
+
+You are solely responsible for how you install, configure, run, interpret, and
+use this software and any data or reports it produces. To the maximum extent
+permitted by applicable law, the authors and contributors will not be liable for
+any claim, damages, loss, exposure, misuse, or other liability arising from or
+related to the software or its use. By using this software, you assume all risks
+and responsibilities associated with that use.
