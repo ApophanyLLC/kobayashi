@@ -43,7 +43,7 @@ def make_db(path: Path) -> None:
             "status": "completed",
             "name": "exec_command",
             "call_id": "call-123",
-            "arguments": '{"cmd":"date","workdir":"/tmp"}',
+            "arguments": '{"cmd":"date","workdir":"/Users/person/demo-tool"}',
         },
     }
     conn.execute(
@@ -237,6 +237,41 @@ def test_captured_report_writes_markdown_file(tmp_path, capsys):
     text = report.read_text()
     assert "Captured Prompt And User Input Content" in text
     assert "user asked to push changes" in text
+
+
+def test_captured_adversarial_report_prints_reconstruction_evidence(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+
+    assert main(["--db", str(db), "captured", "adversarial-report", "--thread-id", "thread-one"]) == 0
+
+    out = capsys.readouterr().out
+    assert "# Adversarial Reconstruction Report" in out
+    assert "Yes. The captured database contains enough structured evidence" in out
+    assert "app.py" in out
+    assert "date" in out
+    assert "/Users/<user>/demo-tool" in out
+    assert "High-Signal Threads" in out
+
+
+def test_captured_adversarial_report_writes_markdown_file(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    report = tmp_path / "adversarial.md"
+    make_db(db)
+
+    assert main(["--db", str(db), "captured", "adversarial-report", "--max-threads", "2", "-o", str(report)]) == 0
+
+    assert "Wrote" in capsys.readouterr().out
+    text = report.read_text()
+    assert "first 2 threads in timestamp order" in text
+    assert "Commands And Workflow Evidence" in text
+    assert "Prompt And Conversation Evidence" in text
+
+
+def test_extract_commit_message_from_command():
+    message = cli.extract_commit_message("git commit -m 'feat: add demo report'")
+
+    assert message == "feat: add demo report"
 
 
 def test_analysis_prompt_wraps_report_as_untrusted_evidence():

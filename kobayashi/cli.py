@@ -4,6 +4,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import shlex
 import sqlite3
 import sys
 import textwrap
@@ -42,6 +43,20 @@ class ThreadInfo:
     first_ts: int
     last_ts: int
     estimated_bytes: int
+
+
+@dataclass(frozen=True)
+class AdversarialFindings:
+    thread_scores: Counter[str]
+    project_roots: Counter[str]
+    local_paths: Counter[str]
+    file_paths: Counter[str]
+    topic_terms: Counter[str]
+    command_prefixes: Counter[str]
+    commit_messages: Counter[str]
+    tool_names: Counter[str]
+    models: Counter[str]
+    signal_counts: Counter[str]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -302,6 +317,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     captured_analyze_db.add_argument("--timeout", type=positive_int, default=300)
     captured_analyze_db.set_defaults(func=captured_analyze_db_cmd)
+
+    captured_adversarial = captured_subparsers.add_parser(
+        "adversarial-report",
+        help="Generate a defensive report showing what an adversary could infer from the logs.",
+    )
+    captured_adversarial.add_argument("--thread-id", help="Thread ID or shortened thread ID.")
+    captured_adversarial.add_argument(
+        "--max-threads",
+        type=positive_int,
+        help="Analyze only the first N threads in timestamp order.",
+    )
+    captured_adversarial.add_argument(
+        "--limit",
+        type=positive_int,
+        default=20,
+        help="Rows to show in each ranked table.",
+    )
+    captured_adversarial.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write the adversarial inference report to this Markdown file.",
+    )
+    captured_adversarial.set_defaults(func=captured_adversarial_report_cmd)
 
     vibe_parser = subparsers.add_parser("vibes", help="Summarize the log stream with flavor.")
     vibe_parser.add_argument(
@@ -907,6 +946,22 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
         print(report)
 
 
+def captured_adversarial_report_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
+    thread_id = resolve_optional_thread_id(conn, args.thread_id)
+    report = build_adversarial_report(
+        conn,
+        thread_id=thread_id,
+        max_threads=args.max_threads,
+        limit=args.limit,
+    )
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(report, encoding="utf-8")
+        print(f"Wrote {args.output}")
+    else:
+        print(report)
+
+
 def build_captured_report(
     conn: sqlite3.Connection,
     *,
@@ -985,6 +1040,486 @@ def build_captured_report(
             "Run the same command with `--full` to include exact captured bodies instead of excerpts."
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_adversarial_report(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str | None,
+    max_threads: int | None,
+    limit: int,
+) -> str:
+    thread_infos = adversarial_thread_infos(conn, thread_id=thread_id, max_threads=max_threads)
+    summary = captured_summary_for_threads(conn, thread_infos)
+    findings = collect_adversarial_findings(conn, thread_infos)
+    total_rows = sum(info.rows for info in thread_infos)
+    first_ts = min((info.first_ts for info in thread_infos), default=None)
+    last_ts = max((info.last_ts for info in thread_infos), default=None)
+    sufficient = adversarial_reconstruction_is_plausible(summary, findings)
+    scope = thread_id or (
+        f"first {fmt_int(max_threads)} threads in timestamp order"
+        if max_threads is not None
+        else "all threads"
+    )
+
+    lines: list[str] = [
+        "# Adversarial Reconstruction Report",
+        "",
+        f"- Scope: `{scope}`",
+        f"- Generated: `{dt.datetime.now().isoformat(timespec='seconds')}`",
+        f"- Threads analyzed: `{fmt_int(len(thread_infos))}`",
+        f"- Rows analyzed: `{fmt_int(total_rows)}`",
+        f"- Thread span: `{fmt_ts(first_ts)}` to `{fmt_ts(last_ts)}`",
+        "",
+        "## Executive Summary",
+        "",
+    ]
+    if not thread_infos:
+        lines.append("No thread-scoped rows were available for analysis.")
+        return "\n".join(lines).rstrip() + "\n"
+
+    if sufficient:
+        lines.append(
+            "Yes. The captured database contains enough structured evidence for an "
+            "adversary to infer likely workstreams, touched files, command habits, "
+            "and conversation/prompt context without needing direct repository access."
+        )
+    else:
+        lines.append(
+            "Not enough high-signal evidence was found in this scope to confidently "
+            "reconstruct workstreams, but metadata and low-volume signals still reveal "
+            "some environment and workflow shape."
+        )
+    lines.append("")
+    lines.append(
+        "This report is deterministic and defensive: it shows the kinds of conclusions "
+        "a motivated reader could draw from captured logs, with local identity signals "
+        "redacted in examples."
+    )
+
+    lines.extend(
+        [
+            "",
+            "## Likely Reconstructable Work",
+            "",
+            "### Project Roots",
+            "",
+        ]
+    )
+    append_ranked_table(lines, findings.project_roots, limit=limit, empty="No local project roots found.")
+    lines.extend(["", "### Files And Paths", ""])
+    append_ranked_table(lines, findings.file_paths, limit=limit, empty="No relative file paths found.")
+    lines.extend(["", "### Topic Terms", ""])
+    append_ranked_table(lines, findings.topic_terms, limit=limit, empty="No recurring topic terms found.")
+
+    lines.extend(
+        [
+            "",
+            "## Evidence Inventory",
+            "",
+            "| Evidence Type | Rows Or Matches |",
+            "| --- | ---: |",
+        ]
+    )
+    for label, key in captured_summary_items():
+        lines.append(f"| {label} | {fmt_int(summary[key])} |")
+    for label, count in findings.signal_counts.most_common():
+        lines.append(f"| {label} | {fmt_int(count)} |")
+
+    lines.extend(["", "## High-Signal Threads", ""])
+    lines.append("| Thread | Score | Rows | Span | Why It Matters |")
+    lines.append("| --- | ---: | ---: | --- | --- |")
+    info_by_thread = {info.thread_id: info for info in thread_infos}
+    for tid, score in findings.thread_scores.most_common(limit):
+        info = info_by_thread.get(tid)
+        if info is None:
+            continue
+        reasons = adversarial_thread_reasons(tid, findings)
+        lines.append(
+            f"| `{markdown_escape(short_id(tid))}` | {fmt_int(score)} | {fmt_int(info.rows)} | "
+            f"{fmt_ts(info.first_ts)} to {fmt_ts(info.last_ts)} | {markdown_escape(reasons)} |"
+        )
+    if not findings.thread_scores:
+        lines.append("| n/a | 0 | 0 | n/a | No high-signal rows found. |")
+
+    lines.extend(["", "## Commands And Workflow Evidence", ""])
+    lines.extend(["### Command Prefixes", ""])
+    append_ranked_table(lines, findings.command_prefixes, limit=limit, empty="No command arguments found.")
+    lines.extend(["", "### Commit Messages", ""])
+    append_ranked_table(
+        lines,
+        findings.commit_messages,
+        limit=limit,
+        empty="No commit messages found in captured command arguments.",
+    )
+    lines.extend(["", "### Tool Names", ""])
+    append_ranked_table(lines, findings.tool_names, limit=limit, empty="No tool names found.")
+
+    lines.extend(["", "## Prompt And Conversation Evidence", ""])
+    lines.append("| Signal | Matches |")
+    lines.append("| --- | ---: |")
+    for key in (
+        "prompt-like UserInput rows",
+        "transcript delta rows",
+        "websocket request payloads",
+        "streamed output text deltas",
+    ):
+        lines.append(f"| {key} | {fmt_int(findings.signal_counts[key])} |")
+
+    lines.extend(["", "## Identity And Environment Evidence", ""])
+    lines.extend(["### Local Paths", ""])
+    append_ranked_table(lines, findings.local_paths, limit=limit, empty="No local paths found.")
+    lines.extend(["", "### Models", ""])
+    append_ranked_table(lines, findings.models, limit=limit, empty="No model names found.")
+    lines.extend(["", "## Limitations", ""])
+    lines.append(
+        "The report infers workstreams from observable strings, paths, patches, commands, "
+        "and prompt markers. It can over-count repeated payloads and it does not prove "
+        "that missing content was never captured elsewhere."
+    )
+    lines.extend(["", "## Defensive Recommendations", ""])
+    for recommendation in (
+        "Treat transcript deltas, tool arguments, patch bodies, and local paths as sensitive telemetry.",
+        "Offer scoped reports like this before export, backup, or support sharing.",
+        "Prefer redaction or opt-in capture for full prompts, patches, and model payload chunks.",
+        "Keep local LLM analysis optional and clearly separate deterministic findings from model inference.",
+    ):
+        lines.append(f"- {recommendation}")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def adversarial_thread_infos(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str | None,
+    max_threads: int | None,
+) -> list[ThreadInfo]:
+    if thread_id is None:
+        return captured_thread_infos(conn, max_threads=max_threads)
+    row = conn.execute(
+        """
+        select
+            thread_id,
+            count(*) as rows,
+            min(ts) as first_ts,
+            max(ts) as last_ts,
+            coalesce(sum(estimated_bytes), 0) as estimated_bytes
+        from logs
+        where thread_id = ?
+        group by thread_id
+        """,
+        (thread_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    return [
+        ThreadInfo(
+            thread_id=row["thread_id"],
+            rows=row["rows"],
+            first_ts=row["first_ts"],
+            last_ts=row["last_ts"],
+            estimated_bytes=row["estimated_bytes"],
+        )
+    ]
+
+
+def collect_adversarial_findings(
+    conn: sqlite3.Connection,
+    thread_infos: Sequence[ThreadInfo],
+) -> AdversarialFindings:
+    thread_scores: Counter[str] = Counter()
+    project_roots: Counter[str] = Counter()
+    local_paths: Counter[str] = Counter()
+    file_paths: Counter[str] = Counter()
+    topic_terms: Counter[str] = Counter()
+    command_prefixes: Counter[str] = Counter()
+    commit_messages: Counter[str] = Counter()
+    tool_names: Counter[str] = Counter()
+    models: Counter[str] = Counter()
+    signal_counts: Counter[str] = Counter()
+
+    if not thread_infos:
+        return AdversarialFindings(
+            thread_scores=thread_scores,
+            project_roots=project_roots,
+            local_paths=local_paths,
+            file_paths=file_paths,
+            topic_terms=topic_terms,
+            command_prefixes=command_prefixes,
+            commit_messages=commit_messages,
+            tool_names=tool_names,
+            models=models,
+            signal_counts=signal_counts,
+        )
+
+    placeholders = ", ".join("?" for _ in thread_infos)
+    rows = conn.execute(
+        f"""
+        select id, ts, ts_nanos, target, thread_id, feedback_log_body
+        from logs
+        where thread_id in ({placeholders})
+        order by ts asc, ts_nanos asc, id asc
+        """,
+        [info.thread_id for info in thread_infos],
+    )
+    for row in rows:
+        body = row["feedback_log_body"] or ""
+        tid = row["thread_id"]
+        scan_body_for_adversarial_signals(
+            body,
+            tid=tid,
+            thread_scores=thread_scores,
+            project_roots=project_roots,
+            local_paths=local_paths,
+            file_paths=file_paths,
+            topic_terms=topic_terms,
+            command_prefixes=command_prefixes,
+            commit_messages=commit_messages,
+            tool_names=tool_names,
+            models=models,
+            signal_counts=signal_counts,
+        )
+
+    return AdversarialFindings(
+        thread_scores=thread_scores,
+        project_roots=project_roots,
+        local_paths=local_paths,
+        file_paths=file_paths,
+        topic_terms=topic_terms,
+        command_prefixes=command_prefixes,
+        commit_messages=commit_messages,
+        tool_names=tool_names,
+        models=models,
+        signal_counts=signal_counts,
+    )
+
+
+def scan_body_for_adversarial_signals(
+    body: str,
+    *,
+    tid: str,
+    thread_scores: Counter[str],
+    project_roots: Counter[str],
+    local_paths: Counter[str],
+    file_paths: Counter[str],
+    topic_terms: Counter[str],
+    command_prefixes: Counter[str],
+    commit_messages: Counter[str],
+    tool_names: Counter[str],
+    models: Counter[str],
+    signal_counts: Counter[str],
+) -> None:
+    score = 0
+    if "ToolCall: apply_patch" in body or "*** Begin Patch" in body:
+        signal_counts["patch/file content rows"] += 1
+        score += 8
+    if "git diff" in body:
+        signal_counts["git diff mentions"] += 1
+        score += 4
+    if "op: UserInput" in body:
+        signal_counts["prompt-like UserInput rows"] += 1
+        score += 6
+    if "TRANSCRIPT DELTA" in body:
+        signal_counts["transcript delta rows"] += 1
+        score += 6
+    if "websocket request:" in body:
+        signal_counts["websocket request payloads"] += 1
+        score += 4
+    if "response.output_text.delta" in body:
+        signal_counts["streamed output text deltas"] += 1
+        score += 3
+    if "user.email=" in body:
+        signal_counts["rows with user.email"] += 1
+        score += 2
+    if "user.account_id=" in body:
+        signal_counts["rows with user.account_id"] += 1
+        score += 2
+
+    for user, project, suffix in re.findall(
+        r"/Users/([^/\s\"\\)>,]+)/([A-Za-z0-9._-]+)(/[^\s\"\\)>,]*)?",
+        body,
+    ):
+        redacted_root = f"/Users/<user>/{project}"
+        project_roots[redacted_root] += 1
+        local_paths[redact_signal_example(f"/Users/{user}/{project}{suffix}")] += 1
+        add_topic_terms(topic_terms, project)
+        score += 1
+
+    for path in re.findall(
+        r"\b(?:app|apps|artifacts|bin|docs|examples|lib|packaging|scripts|skills|src|tests)/"
+        r"[A-Za-z0-9._~+/@%:,=-]+",
+        body,
+    ):
+        cleaned = path.rstrip(".,;:)]}")
+        file_paths[cleaned] += 1
+        add_topic_terms(topic_terms, cleaned)
+        score += 2
+
+    for path in extract_patch_file_paths(body):
+        file_paths[path] += 1
+        add_topic_terms(topic_terms, path)
+        score += 3
+
+    for cmd in extract_command_strings(body):
+        prefix = command_prefix(cmd)
+        if prefix:
+            command_prefixes[prefix] += 1
+            add_topic_terms(topic_terms, prefix)
+            score += 2
+        commit_message = extract_commit_message(cmd)
+        if commit_message:
+            commit_messages[commit_message] += 1
+            add_topic_terms(topic_terms, commit_message)
+            score += 4
+
+    for name in re.findall(r"ToolCall:\s*([A-Za-z0-9_.-]+)", body):
+        tool_names[name] += 1
+        score += 1
+    for name in re.findall(r'"name"\s*:\s*"([A-Za-z0-9_.-]+)"', body):
+        tool_names[name] += 1
+
+    for model in re.findall(r'\bmodel[=:]\s*["\']?([A-Za-z0-9_.:/@+-]+)', body):
+        models[model.rstrip('",')] += 1
+
+    if score:
+        thread_scores[tid] += score
+
+
+def extract_command_strings(body: str) -> list[str]:
+    commands: list[str] = []
+    message = extract_received_message(body)
+    if message is not None:
+        call = extract_call(message)
+        if call and call["arguments"]:
+            try:
+                parsed_args = json.loads(call["arguments"])
+            except json.JSONDecodeError:
+                parsed_args = None
+            if isinstance(parsed_args, dict) and isinstance(parsed_args.get("cmd"), str):
+                commands.append(parsed_args["cmd"])
+
+    for match in re.finditer(r'"cmd"\s*:\s*"((?:\\.|[^"\\])*)"', body):
+        try:
+            parsed = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, str) and parsed:
+            commands.append(parsed)
+    return commands
+
+
+def command_prefix(cmd: str) -> str:
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        parts = cmd.split()
+    if not parts:
+        return ""
+    return " ".join(parts[: min(3, len(parts))])
+
+
+def extract_commit_message(cmd: str) -> str | None:
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return None
+    if "commit" not in parts:
+        return None
+    for index, part in enumerate(parts[:-1]):
+        if part == "-m":
+            return parts[index + 1]
+    return None
+
+
+def extract_patch_file_paths(body: str) -> list[str]:
+    paths: list[str] = []
+    for match in re.finditer(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", body, re.MULTILINE):
+        paths.append(match.group(1).strip())
+    for match in re.finditer(r"^diff --git a/(\S+) b/\S+$", body, re.MULTILINE):
+        paths.append(match.group(1).strip())
+    return paths
+
+
+def add_topic_terms(counter: Counter[str], text: str) -> None:
+    stopwords = {
+        "add",
+        "app",
+        "apps",
+        "and",
+        "artifacts",
+        "bin",
+        "core",
+        "docs",
+        "examples",
+        "file",
+        "for",
+        "from",
+        "git",
+        "lib",
+        "local",
+        "packaging",
+        "python",
+        "scripts",
+        "skills",
+        "src",
+        "test",
+        "tests",
+        "the",
+        "update",
+        "with",
+    }
+    for term in re.split(r"[^A-Za-z0-9]+", text):
+        lowered = term.lower()
+        if len(lowered) < 4 or lowered in stopwords:
+            continue
+        counter[lowered] += 1
+
+
+def adversarial_reconstruction_is_plausible(
+    summary: sqlite3.Row,
+    findings: AdversarialFindings,
+) -> bool:
+    high_signal_rows = (
+        (summary["tool_apply_patch"] or 0)
+        + (summary["begin_patch"] or 0)
+        + (summary["git_diff"] or 0)
+        + (summary["user_input"] or 0)
+        + (summary["transcript_delta"] or 0)
+        + (summary["websocket_request"] or 0)
+    )
+    return high_signal_rows > 0 or bool(
+        findings.file_paths or findings.command_prefixes or findings.commit_messages
+    )
+
+
+def adversarial_thread_reasons(tid: str, findings: AdversarialFindings) -> str:
+    reasons: list[str] = []
+    if findings.thread_scores[tid] >= 8:
+        reasons.append("dense captured content")
+    if findings.file_paths:
+        reasons.append("file/path evidence")
+    if findings.command_prefixes:
+        reasons.append("command evidence")
+    if findings.commit_messages:
+        reasons.append("commit-message evidence")
+    return ", ".join(reasons[:3]) or "metadata signals"
+
+
+def append_ranked_table(
+    lines: list[str],
+    counter: Counter[str],
+    *,
+    limit: int,
+    empty: str,
+) -> None:
+    if not counter:
+        lines.append(empty)
+        return
+    lines.append("| Value | Count |")
+    lines.append("| --- | ---: |")
+    for value, count in counter.most_common(limit):
+        lines.append(f"| `{markdown_escape(value)}` | {fmt_int(count)} |")
 
 
 def build_analysis_prompt(report: str) -> str:
