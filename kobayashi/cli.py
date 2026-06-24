@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import ipaddress
 import json
 import re
 import shlex
+import socket
 import sqlite3
 import sys
 import textwrap
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
@@ -232,7 +235,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     captured_analyze.add_argument(
         "--url",
+        "--base-url",
+        dest="url",
         help="Local LLM base URL. Defaults to Ollama or OpenAI-compatible localhost.",
+    )
+    captured_analyze.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow sending captured reports to a non-loopback LLM URL.",
     )
     captured_analyze.add_argument("--model", help="Local model name to call. Auto-discovered when omitted.")
     captured_analyze.add_argument(
@@ -273,7 +283,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     captured_analyze_db.add_argument(
         "--url",
+        "--base-url",
+        dest="url",
         help="Local LLM base URL. Defaults to llama.cpp at http://127.0.0.1:8080/v1.",
+    )
+    captured_analyze_db.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow sending captured reports to a non-loopback LLM URL.",
     )
     captured_analyze_db.add_argument("--model", help="Local model name to call. Auto-discovered when omitted.")
     captured_analyze_db.add_argument(
@@ -355,7 +372,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     captured_adversarial_analyze.add_argument(
         "--url",
+        "--base-url",
+        dest="url",
         help="Local LLM base URL. Defaults to llama.cpp at http://127.0.0.1:8080/v1.",
+    )
+    captured_adversarial_analyze.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow sending captured reports to a non-loopback LLM URL.",
     )
     captured_adversarial_analyze.add_argument("--model", help="Local model name to call. Auto-discovered when omitted.")
     captured_adversarial_analyze.add_argument(
@@ -868,6 +892,7 @@ def captured_analyze_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> 
     prompt = build_analysis_prompt(report)
     url = args.url or default_llm_url(args.provider)
     try:
+        ensure_loopback_llm_url(url, allow_remote=args.allow_remote)
         model = args.model or discover_local_model(
             provider=args.provider,
             url=url,
@@ -898,6 +923,7 @@ def captured_analyze_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> 
 def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
     url = args.url or default_llm_url(args.provider)
     try:
+        ensure_loopback_llm_url(url, allow_remote=args.allow_remote)
         model = args.model or discover_local_model(
             provider=args.provider,
             url=url,
@@ -1019,6 +1045,7 @@ def captured_adversarial_analyze_cmd(conn: sqlite3.Connection, args: argparse.Na
         else "all threads"
     )
     try:
+        ensure_loopback_llm_url(url, allow_remote=args.allow_remote)
         model = args.model or discover_local_model(
             provider=args.provider,
             url=url,
@@ -2098,6 +2125,53 @@ def default_llm_url(provider: str) -> str:
     if provider == "llama.cpp":
         return "http://127.0.0.1:8080/v1"
     return "http://127.0.0.1:1234/v1"
+
+
+def ensure_loopback_llm_url(url: str, *, allow_remote: bool) -> None:
+    if allow_remote:
+        return
+
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(
+            f"could not verify LLM URL {url!r} as loopback. "
+            "Use an http(s) localhost URL, or pass --allow-remote if you intend "
+            "to send captured reports off-box."
+        ) from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(
+            f"could not verify LLM URL {url!r} as loopback. "
+            "Use an http(s) localhost URL, or pass --allow-remote if you intend "
+            "to send captured reports off-box."
+        )
+
+    host = parsed.hostname.rstrip(".")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise RuntimeError(
+                f"could not resolve LLM host {host!r} to verify it is loopback. "
+                "Use 127.0.0.1, ::1, localhost, or pass --allow-remote if you "
+                "intend to send captured reports off-box."
+            ) from exc
+        addresses = {info[4][0] for info in infos}
+        if addresses and all(ipaddress.ip_address(address).is_loopback for address in addresses):
+            return
+    else:
+        if ip.is_loopback:
+            return
+
+    raise RuntimeError(
+        f"refusing non-loopback LLM URL {url!r}. LLM-backed commands can send "
+        "private prompts, file paths, patches, and tool arguments. Use a "
+        "127.0.0.1, ::1, or localhost URL, or pass --allow-remote if you "
+        "intend to send captured reports off-box."
+    )
 
 
 def call_local_llm(

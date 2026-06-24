@@ -56,9 +56,10 @@ adversary-perspective analysis.
 ## Optional Local LLM Setup
 
 The LLM-backed commands are optional. All deterministic commands work without a
-local model. Keep local model servers bound to `127.0.0.1` or `localhost`;
-captured reports may contain private prompts, file paths, patches, and tool
-arguments.
+local model. By default, Kobayashi refuses to send reports to non-loopback LLM
+URLs because captured reports may contain private prompts, file paths, patches,
+and tool arguments. Use a `127.0.0.1`, `::1`, or `localhost` URL unless you
+intentionally want to send report content off-box.
 
 ### Ollama
 
@@ -109,6 +110,23 @@ python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adver
 
 For large `--full` reports, increase `--timeout`, reduce `--chunk-chars`, or
 omit `--full` if the local server times out or rejects a prompt.
+
+### Remote LLM endpoints
+
+`--url` and `--base-url` are aliases. If you point either flag at a host that
+does not resolve to loopback, Kobayashi exits before model discovery or analysis
+requests are sent. To intentionally use a remote or LAN endpoint, pass
+`--allow-remote`:
+
+```bash
+python3 -m kobayashi captured analyze \
+  --base-url http://LLM_HOST:PORT/v1 \
+  --allow-remote \
+  --model MODEL_NAME \
+  --thread-id THREAD_ID
+```
+
+Only use `--allow-remote` for endpoints you trust with the report contents.
 
 ## License
 

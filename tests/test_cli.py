@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kobayashi.cli as cli
@@ -349,6 +351,80 @@ def test_default_llm_urls():
     assert default_llm_url("ollama") == "http://127.0.0.1:11434"
     assert default_llm_url("llama.cpp") == "http://127.0.0.1:8080/v1"
     assert default_llm_url("openai-compatible") == "http://127.0.0.1:1234/v1"
+
+
+def test_llm_url_guard_allows_loopback_and_rejects_remote():
+    cli.ensure_loopback_llm_url("http://127.0.0.1:8080/v1", allow_remote=False)
+    cli.ensure_loopback_llm_url("http://[::1]:8080/v1", allow_remote=False)
+    cli.ensure_loopback_llm_url("http://192.0.2.10:8080/v1", allow_remote=True)
+
+    with pytest.raises(RuntimeError, match="refusing non-loopback"):
+        cli.ensure_loopback_llm_url("http://192.0.2.10:8080/v1", allow_remote=False)
+
+
+@pytest.mark.parametrize(
+    "command_args",
+    [
+        ["analyze", "--thread-id", "thread-one"],
+        ["analyze-db", "--max-threads", "1"],
+        ["adversarial-analyze", "--thread-id", "thread-one"],
+    ],
+)
+def test_llm_commands_reject_remote_base_url_before_model_discovery(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    command_args,
+):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+
+    def fail_discovery(**_kwargs):
+        raise AssertionError("model discovery should not run for rejected remote URLs")
+
+    monkeypatch.setattr(cli, "discover_local_model", fail_discovery)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--db",
+                str(db),
+                "captured",
+                *command_args,
+                "--base-url",
+                "http://192.0.2.10:8080/v1",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "refusing non-loopback LLM URL" in capsys.readouterr().err
+
+
+def test_captured_analyze_allows_remote_base_url_when_explicit(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_db(db)
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+    monkeypatch.setattr(cli, "call_local_llm", lambda **_kwargs: "remote analysis")
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "captured",
+                "analyze",
+                "--thread-id",
+                "thread-one",
+                "--base-url",
+                "http://192.0.2.10:8080/v1",
+                "--allow-remote",
+            ]
+        )
+        == 0
+    )
+
+    assert "remote analysis" in capsys.readouterr().out
 
 
 def test_captured_thread_infos_are_timestamp_ordered(tmp_path):
