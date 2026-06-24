@@ -939,6 +939,18 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
         per_thread: list[tuple[ThreadInfo, str]] = []
         total = len(thread_infos)
         for index, info in enumerate(thread_infos, start=1):
+            stem = f"{index:04d}-{safe_filename(short_id(info.thread_id))}"
+            report_path = args.output_dir / f"{stem}-report.md" if args.output_dir else None
+            analysis_path = args.output_dir / f"{stem}-analysis.md" if args.output_dir else None
+            chunk_cache_dir = args.output_dir / f"{stem}-chunks" if args.output_dir else None
+            if analysis_path and analysis_path.exists():
+                print(
+                    f"Reusing thread {index}/{total}: {short_id(info.thread_id)}",
+                    file=sys.stderr,
+                )
+                per_thread.append((info, analysis_path.read_text(encoding="utf-8")))
+                continue
+
             print(
                 f"Analyzing thread {index}/{total}: {short_id(info.thread_id)}",
                 file=sys.stderr,
@@ -949,6 +961,8 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
                 full=args.full,
                 limit=args.limit_per_section,
             )
+            if report_path:
+                report_path.write_text(report, encoding="utf-8")
             prompt = build_thread_analysis_prompt(report, index=index, total=total)
             analysis = analyze_report_with_local_llm(
                 provider=args.provider,
@@ -959,15 +973,24 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
                 label=f"thread {index}/{total} {info.thread_id}",
                 chunk_chars=args.chunk_chars,
                 timeout=args.timeout,
+                cache_dir=chunk_cache_dir,
             )
             per_thread.append((info, analysis))
-            if args.output_dir:
-                stem = f"{index:04d}-{safe_filename(short_id(info.thread_id))}"
-                (args.output_dir / f"{stem}-report.md").write_text(report, encoding="utf-8")
-                (args.output_dir / f"{stem}-analysis.md").write_text(analysis, encoding="utf-8")
+            if analysis_path:
+                analysis_path.write_text(analysis, encoding="utf-8")
 
         batch_summaries: list[str] = []
         for batch_index, batch in enumerate(chunked(per_thread, args.batch_size), start=1):
+            batch_path = (
+                args.output_dir / f"batch-{batch_index:04d}-summary.md"
+                if args.output_dir
+                else None
+            )
+            if batch_path and batch_path.exists():
+                print(f"Reusing batch {batch_index}", file=sys.stderr)
+                batch_summaries.append(batch_path.read_text(encoding="utf-8"))
+                continue
+
             print(f"Summarizing batch {batch_index}", file=sys.stderr)
             prompt = build_batch_synthesis_prompt(batch, batch_index=batch_index)
             summary = call_local_llm(
@@ -978,11 +1001,8 @@ def captured_analyze_db_cmd(conn: sqlite3.Connection, args: argparse.Namespace) 
                 timeout=args.timeout,
             )
             batch_summaries.append(summary)
-            if args.output_dir:
-                (args.output_dir / f"batch-{batch_index:04d}-summary.md").write_text(
-                    summary,
-                    encoding="utf-8",
-                )
+            if batch_path:
+                batch_path.write_text(summary, encoding="utf-8")
 
         print("Writing database-wide synthesis", file=sys.stderr)
         database_summary = build_database_summary(conn, thread_infos)
@@ -1850,6 +1870,7 @@ def analyze_report_with_local_llm(
     label: str,
     chunk_chars: int,
     timeout: int,
+    cache_dir: Path | None = None,
 ) -> str:
     if len(prompt) <= chunk_chars:
         return call_local_llm(
@@ -1862,12 +1883,20 @@ def analyze_report_with_local_llm(
 
     chunks = split_text_for_llm(report, chunk_chars)
     chunk_analyses: list[str] = []
+    if cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"Chunking {label} into {len(chunks)} local LLM requests "
         f"({len(report):,} chars, chunk size {chunk_chars:,})",
         file=sys.stderr,
     )
     for index, chunk in enumerate(chunks, start=1):
+        cache_path = cache_dir / f"chunk-{index:04d}-analysis.md" if cache_dir else None
+        if cache_path and cache_path.exists():
+            print(f"Reusing chunk {index}/{len(chunks)} for {label}", file=sys.stderr)
+            chunk_analyses.append(cache_path.read_text(encoding="utf-8"))
+            continue
+
         print(f"Analyzing chunk {index}/{len(chunks)} for {label}", file=sys.stderr)
         chunk_prompt = build_report_chunk_prompt(
             chunk,
@@ -1875,15 +1904,16 @@ def analyze_report_with_local_llm(
             index=index,
             total=len(chunks),
         )
-        chunk_analyses.append(
-            call_local_llm(
-                provider=provider,
-                url=url,
-                model=model,
-                prompt=chunk_prompt,
-                timeout=timeout,
-            )
+        chunk_analysis = call_local_llm(
+            provider=provider,
+            url=url,
+            model=model,
+            prompt=chunk_prompt,
+            timeout=timeout,
         )
+        chunk_analyses.append(chunk_analysis)
+        if cache_path:
+            cache_path.write_text(chunk_analysis, encoding="utf-8")
 
     synthesis_prompt = build_report_chunk_synthesis_prompt(label, chunk_analyses)
     print(f"Synthesizing chunk analyses for {label}", file=sys.stderr)

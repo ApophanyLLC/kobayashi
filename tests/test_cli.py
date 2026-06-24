@@ -481,6 +481,58 @@ def test_captured_analyze_db_uses_local_llm_for_threads_batches_and_final(tmp_pa
     assert "comprehensive database-wide" in prompts[-1]
 
 
+def test_captured_analyze_db_reuses_output_dir_checkpoints(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "logs.sqlite"
+    output = tmp_path / "database-analysis.md"
+    output_dir = tmp_path / "database-analysis-work"
+    output_dir.mkdir()
+    make_db(db)
+    first_stem = f"0001-{cli.safe_filename(cli.short_id('thread-one'))}"
+    second_stem = f"0002-{cli.safe_filename(cli.short_id('thread-two'))}"
+    (output_dir / f"{first_stem}-analysis.md").write_text("saved thread-one analysis", encoding="utf-8")
+    (output_dir / "batch-0001-summary.md").write_text("saved batch one", encoding="utf-8")
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "discover_local_model", lambda **_kwargs: "fake-model")
+
+    def fake_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return f"fresh analysis {len(prompts)}"
+
+    monkeypatch.setattr(cli, "call_local_llm", fake_call_local_llm)
+
+    assert main(
+        [
+            "--db",
+            str(db),
+            "captured",
+            "analyze-db",
+            "--max-threads",
+            "2",
+            "--batch-size",
+            "1",
+            "--limit-per-section",
+            "1",
+            "--output-dir",
+            str(output_dir),
+            "-o",
+            str(output),
+        ]
+    ) == 0
+
+    stderr = capsys.readouterr().err
+    text = output.read_text()
+    assert "Reusing thread 1/2" in stderr
+    assert "Reusing batch 1" in stderr
+    assert "saved thread-one analysis" in text
+    assert (output_dir / f"{second_stem}-report.md").exists()
+    assert (output_dir / f"{second_stem}-analysis.md").exists()
+    assert len(prompts) == 3
+    assert "thread 2 of 2" in prompts[0]
+    assert "synthesizing batch 2" in prompts[1]
+    assert "comprehensive database-wide" in prompts[2]
+
+
 def test_analyze_report_chunks_large_reports(monkeypatch):
     prompts: list[str] = []
 
@@ -505,3 +557,56 @@ def test_analyze_report_chunks_large_reports(monkeypatch):
     assert len(prompts) > 2
     assert "REPORT CHUNK START" in prompts[0]
     assert "synthesizing chunk analyses" in prompts[-1]
+
+
+def test_analyze_report_reuses_cached_chunk_analyses(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "chunks"
+    prompts: list[str] = []
+
+    def first_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        if "synthesizing chunk analyses" in kwargs["prompt"]:
+            raise RuntimeError("synthetic synthesis timeout")
+        return f"cached chunk analysis {len(prompts)}"
+
+    monkeypatch.setattr(cli, "call_local_llm", first_call_local_llm)
+
+    with pytest.raises(RuntimeError, match="synthetic synthesis timeout"):
+        cli.analyze_report_with_local_llm(
+            provider="llama.cpp",
+            url="http://127.0.0.1:8080/v1",
+            model="fake-model",
+            report="line\n" * 50,
+            prompt="outer prompt " + ("x" * 500),
+            label="thread-test",
+            chunk_chars=80,
+            timeout=1,
+            cache_dir=cache_dir,
+        )
+
+    assert list(cache_dir.glob("chunk-*-analysis.md"))
+    prompts.clear()
+
+    def second_call_local_llm(**kwargs):
+        prompts.append(kwargs["prompt"])
+        if "REPORT CHUNK START" in kwargs["prompt"]:
+            raise AssertionError("cached chunk analysis should be reused")
+        return "synthesized from cached chunks"
+
+    monkeypatch.setattr(cli, "call_local_llm", second_call_local_llm)
+
+    result = cli.analyze_report_with_local_llm(
+        provider="llama.cpp",
+        url="http://127.0.0.1:8080/v1",
+        model="fake-model",
+        report="line\n" * 50,
+        prompt="outer prompt " + ("x" * 500),
+        label="thread-test",
+        chunk_chars=80,
+        timeout=1,
+        cache_dir=cache_dir,
+    )
+
+    assert result == "synthesized from cached chunks"
+    assert len(prompts) == 1
+    assert "synthesizing chunk analyses" in prompts[0]

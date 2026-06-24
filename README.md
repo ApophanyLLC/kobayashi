@@ -47,8 +47,10 @@ Use `captured analyze-db` to walk every thread in first-seen timestamp order,
 ask the local LLM for a per-thread analysis, summarize batches, and synthesize a
 database-wide Markdown report. This can make many local model calls; use
 `--max-threads` for a smoke test and `--output-dir` to keep per-thread artifacts.
-Large `--full` reports are automatically chunked before they are sent to the
-local LLM; tune that with `--chunk-chars` if your server rejects large prompts.
+When `--output-dir` is set, per-thread reports, per-thread analyses, chunk
+analyses, and batch summaries are checkpointed and reused on rerun. Large
+`--full` reports are automatically chunked before they are sent to the local
+LLM; tune that with `--chunk-chars` if your server rejects large prompts.
 
 Use `captured adversarial-report` for a deterministic report showing what an
 adversarial reader could infer from the database. Use `captured
