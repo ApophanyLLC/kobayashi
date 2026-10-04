@@ -26,6 +26,11 @@ python3 -m kobayashi captured adversarial-report --all -o adversarial-report.md
 python3 -m kobayashi captured adversarial-analyze --thread-id THREAD_ID -o adversarial-analysis.md
 python3 -m kobayashi captured adversarial-analyze --all -o adversarial-analysis.md
 python3 -m kobayashi captured adversarial-analyze-db --full --output-dir adversarial-database-analysis-work -o adversarial-database-analysis-full.md
+python3 -m kobayashi workflow strategies
+python3 -m kobayashi workflow loops --recent 50
+python3 -m kobayashi workflow validation --thread-id THREAD_ID
+python3 -m kobayashi workflow recovery
+python3 -m kobayashi workflow report -o workflow-report.md
 python3 -m kobayashi captured summary --thread-id THREAD_ID
 python3 -m kobayashi captured patches --thread-id THREAD_ID --full
 python3 -m kobayashi captured inputs --thread-id THREAD_ID --full
@@ -41,6 +46,45 @@ intentional transcript and payload spelunking.
 Use `captured report` to generate a Markdown audit of what file/patch content
 and prompt-like input content was captured for a thread. Use `captured summary`,
 `captured patches`, and `captured inputs` for focused terminal drilldowns.
+
+## Workflow Mining
+
+The `workflow` command reconstructs each thread's timeline of agent actions
+(shell commands and `apply_patch` edits, with prompt/transcript echo rows
+excluded) and mines four families of recurring pattern. Simple top-level shell
+sequences are counted as distinct actions; pipelines and complex shell programs
+remain intact. It is deterministic, read-only, and needs no local model. Local
+user paths are redacted in output.
+
+```bash
+python3 -m kobayashi workflow strategies   # recurring action sequences and opening moves
+python3 -m kobayashi workflow loops        # redundant investigation (repeated reads, long streaks)
+python3 -m kobayashi workflow validation   # how often edits are checked with tests/linters/diffs
+python3 -m kobayashi workflow recovery     # what the agent does after failures
+python3 -m kobayashi workflow report -o workflow-report.md  # all four as one Markdown report
+```
+
+`strategies` reports the action mix, common phase transitions, opening moves,
+and the most recurring verb bigrams/trigrams ranked by how many threads share
+them. Useful CLI subcommands such as `pantacle check ...` are preserved in those
+verbs. `loops` leads with the longest genuinely uninterrupted investigation
+streaks, separates within-task repeated file access from across-task file
+popularity, and reports repeated investigation commands. `validation`
+coalesces consecutive code changes into edit bursts, then measures whether each
+burst was followed by tests, linters, program runs, or `git diff`; it also shows
+thread-level validation coverage. `recovery` parses strong failure and success
+shapes from native outputs plus structured tool call/result items inside approval
+transcripts. Those transcript actions are used only for recovery, are
+deduplicated, and cannot inflate the other three analyses. Recovery reports the
+first response, successful retry, repeated failure, unresolved episode, and
+healthy failure -> fix -> passing validation loops.
+
+Each subcommand accepts `--thread-id` for one thread, `--recent N` for the N
+most recently active threads, `--since-days DAYS` for a database-relative recent
+window, legacy `--max-threads` for the earliest timestamp-ordered subset, or
+`--all` for the full database (the default when no scope flag is given), plus
+`-n/--limit` to size each ranked table. The findings are workflow signals, not
+audit-grade metrics; see the report's Limitations section.
 
 Use `captured analyze` to send the report to a local LLM. It defaults to a
 llama.cpp/OpenAI-compatible server at `http://127.0.0.1:8080/v1` and will try to

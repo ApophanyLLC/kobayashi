@@ -92,6 +92,411 @@ user asked to push changes
     conn.close()
 
 
+def make_workflow_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        create table logs (
+            id integer primary key autoincrement,
+            ts integer not null,
+            ts_nanos integer not null,
+            level text not null,
+            target text not null,
+            feedback_log_body text,
+            module_path text,
+            file text,
+            line integer,
+            thread_id text,
+            process_uuid text,
+            estimated_bytes integer not null default 0
+        );
+        """
+    )
+    bodies = [
+        'ToolCall: exec tools.exec_command({"cmd":"rg foo src/app.py","workdir":"/Users/person/demo"})',
+        "ToolCall: exec tools.exec_command({\"cmd\":\"sed -n '1,50p' src/app.py\"})",
+        "ToolCall: exec tools.exec_command({\"cmd\":\"sed -n '1,50p' src/app.py\"})",
+        "ToolCall: apply_patch *** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch",
+        'ToolCall: exec tools.exec_command({"cmd":"python -m pytest tests/test_app.py"})',
+        "run tests output: FAILED tests/test_app.py::test_x - AssertionError raised",
+        "ToolCall: apply_patch *** Begin Patch\n*** Update File: src/app.py\n@@\n-bad\n+good\n*** End Patch",
+        'ToolCall: exec tools.exec_command({"cmd":"pytest -q"})',
+        'session handlers op: UserInput { items: [Text { text: "please run ({\\"cmd\\":\\"evilcmd bar\\"})" }] }',
+    ]
+    base_ts = 1780000000
+    for index, body in enumerate(bodies):
+        conn.execute(
+            """
+            insert into logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, estimated_bytes)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (base_ts + index * 60, 1, "INFO", "codex_core::stream_events_utils", body, "wf-thread", "proc-wf", 100),
+        )
+    recovery_history = """
+[10] tool exec_command call: {"cmd":"pytest -q tests/test_app.py"}
+[11] tool exec_command result: Process exited with code 1
+Output:
+FAILED tests/test_app.py::test_x - AssertionError
+1 failed in 0.10s
+[12] tool apply_patch call: *** Begin Patch
+*** Update File: src/app.py
+@@
+-bad
++good
+*** End Patch
+[13] tool apply_patch result: Script completed
+Output:
+Done!
+[14] tool exec_command call: {"cmd":"pytest -q tests/test_app.py"}
+[15] tool exec_command result: Script completed
+Output:
+1 passed in 0.08s
+""".strip()
+    transcript_body = (
+        "session handlers op: UserInput TRANSCRIPT DELTA "
+        f"Text {{ text: {json.dumps(recovery_history)}, text_elements: [] }} "
+        'Text { text: "User prose says FAILED example.py::test_quote", text_elements: [] }'
+    )
+    for offset in (0, 1):
+        conn.execute(
+            """
+            insert into logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, estimated_bytes)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                base_ts + 1000 + offset,
+                1,
+                "INFO",
+                "codex_core::session::handlers",
+                transcript_body,
+                "wf-thread",
+                "proc-wf",
+                100,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_classify_command_maps_verbs_and_categories():
+    assert cli.classify_command("git commit -m x")[:2] == ("edit", "git commit")
+    assert cli.classify_command("git diff")[:2] == ("investigate", "git diff")
+    assert cli.classify_command("python -m pytest tests")[:2] == ("validate", "pytest")
+    assert cli.classify_command("sed -n '1,5p' a.py")[:2] == ("investigate", "sed")
+    assert cli.classify_command("sed -i 's/a/b/' a.py")[:2] == ("edit", "sed -i")
+    assert cli.classify_command(".venv/bin/ruff check src")[:2] == ("validate", "ruff")
+    assert cli.classify_command("rg foo src/app.py")[:2] == ("investigate", "rg")
+    assert cli.classify_command("python -m pantacle check docs")[:2] == (
+        "validate",
+        "pantacle check docs",
+    )
+    assert cli.classify_command("pantacle assistant intake --task demo")[:2] == (
+        "investigate",
+        "pantacle assistant intake",
+    )
+    assert cli.classify_command("pantacle ci describe default")[:2] == (
+        "investigate",
+        "pantacle ci describe",
+    )
+    assert cli.classify_command("pantacle ci run default")[:2] == (
+        "validate",
+        "pantacle ci run",
+    )
+
+
+def test_workflow_extracts_modern_unquoted_cmd_key():
+    body = 'ToolCall: exec const r = await tools.exec_command({cmd:"rg foo src/app.py"});'
+
+    assert cli.extract_workflow_commands(body) == ["rg foo src/app.py"]
+
+
+def test_workflow_splits_simple_shell_sequences_conservatively():
+    commands, unsplit = cli.split_shell_sequence(
+        "rg 'a;b' src/app.py && pytest -q\nruff check src"
+    )
+    assert commands == ["rg 'a;b' src/app.py", "pytest -q", "ruff check src"]
+    assert unsplit is False
+
+    commands, unsplit = cli.split_shell_sequence(
+        "printf '%s' $(echo 'a;b') || git diff --check"
+    )
+    assert commands == ["printf '%s' $(echo 'a;b')", "git diff --check"]
+    assert unsplit is False
+
+    assert cli.split_shell_sequence("rg foo src | head -20") == (["rg foo src | head -20"], False)
+    complex_command = "for path in src tests; do rg foo $path; done"
+    assert cli.split_shell_sequence(complex_command) == ([complex_command], True)
+
+
+def test_workflow_chain_segments_become_distinct_actions():
+    body = 'ToolCall: exec tools.exec_command({"cmd":"rg foo src/app.py && pytest -q; git diff --check"})'
+
+    events = cli.row_to_workflow_events(row_id=1, ts=1, ts_nanos=1, body=body)
+
+    assert [(event.category, event.verb) for event in events] == [
+        ("investigate", "rg"),
+        ("validate", "pytest"),
+        ("investigate", "git diff"),
+    ]
+
+
+def test_workflow_structured_transcript_parser_ignores_surrounding_prose():
+    history = """
+[20] tool exec_command call: {"cmd":"pytest -q"}
+[21] tool exec_command result: Process exited with code 1
+Output:
+FAILED tests/test_x.py::test_x
+1 failed in 0.1s
+""".strip()
+    body = (
+        "op: UserInput TRANSCRIPT DELTA "
+        f"Text {{ text: {json.dumps(history)}, text_elements: [] }} "
+        'Text { text: "FAILED quoted.py::test_prose", text_elements: [] }'
+    )
+
+    items = cli.extract_structured_transcript_items(body)
+
+    assert [item[:3] for item in items] == [
+        (20, "exec_command", "call"),
+        (21, "exec_command", "result"),
+    ]
+    assert cli.extract_workflow_result_outcome(items[1][3]) == (
+        "failed",
+        ("test failure", "non-zero exit"),
+    )
+
+
+def test_workflow_does_not_treat_failure_words_inside_commands_as_failures():
+    body = 'ToolCall: exec tools.exec_command({"cmd":"rg SyntaxError error: src/app.py"})'
+
+    events = cli.row_to_workflow_events(row_id=1, ts=1, ts_nanos=1, body=body)
+
+    assert [event.kind for event in events] == ["action"]
+
+
+def test_workflow_requires_failure_context_for_exception_names():
+    assert cli.extract_workflow_failure_markers("except SyntaxError:\n    continue") == ()
+    assert cli.extract_workflow_failure_markers(
+        "Traceback (most recent call last):\n  File 'x.py'\nSyntaxError: bad input"
+    ) == ("traceback", "syntax error")
+    assert cli.extract_workflow_result_outcome(
+        "Script completed\nOutput:\nls: optional.txt: No such file or directory"
+    ) == ("passed", ())
+    assert cli.extract_workflow_result_outcome('{"exit_code":2,"output":"bad"}') == (
+        "failed",
+        ("non-zero exit",),
+    )
+    assert cli.extract_workflow_result_outcome('{"success":false,"isError":true}') == (
+        "failed",
+        ("tool error",),
+    )
+
+
+def test_workflow_excludes_quoted_user_input_commands(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "strategies", "--thread-id", "wf-thread"]) == 0
+
+    out = capsys.readouterr().out
+    assert "actions mined: 7" in out
+    assert "evilcmd" not in out
+    assert "rg -> sed" in out
+
+
+def test_workflow_loops_detects_repeated_reads(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "loops", "--thread-id", "wf-thread"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Within-Task Repeated File Accesses" in out
+    assert "src/app.py" in out
+    assert "within-task repeated file accesses: 2" in out
+
+
+def test_workflow_validation_tracks_checks_after_edits(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "validation", "--thread-id", "wf-thread"]) == 0
+
+    out = capsys.readouterr().out
+    assert "code edits: 2 in 2 bursts" in out
+    assert "validated bursts: 2 (100%)" in out
+    assert "pytest" in out
+
+
+def test_workflow_validation_coalesces_consecutive_edits_into_bursts():
+    def event(seq, category, verb):
+        return cli.WorkflowEvent(1, 1, 1, seq, "action", category, verb)
+
+    report = cli.analyze_validation(
+        {
+            "thread": [
+                event(0, "edit", "apply_patch"),
+                event(1, "edit", "apply_patch"),
+                event(2, "edit", "apply_patch"),
+                event(3, "validate", "pytest"),
+            ]
+        }
+    )
+
+    assert report.total_edits == 3
+    assert report.total_edit_bursts == 1
+    assert report.checked_bursts == 1
+    assert report.tested_bursts == 1
+
+
+def test_workflow_investigation_streak_resets_on_any_other_action():
+    def event(seq, category, verb, path=""):
+        paths = (path,) if path else ()
+        return cli.WorkflowEvent(1, 1, 1, seq, "action", category, verb, verb, paths)
+
+    report = cli.analyze_loops(
+        {
+            "thread": [
+                event(0, "investigate", "rg", "a.py"),
+                event(1, "investigate", "sed", "b.py"),
+                event(2, "investigate", "nl", "c.py"),
+                event(3, "validate", "pytest"),
+                event(4, "investigate", "rg", "d.py"),
+                event(5, "investigate", "sed", "e.py"),
+            ]
+        }
+    )
+
+    assert report.longest_streaks == [("thread", 3)]
+
+
+def test_workflow_loop_metrics_separate_within_task_repeats_from_popularity():
+    def event(seq, path):
+        return cli.WorkflowEvent(1, 1, 1, seq, "action", "investigate", "sed", f"sed {path}", (path,))
+
+    report = cli.analyze_loops(
+        {
+            "one": [event(0, "a.py"), event(1, "a.py"), event(2, "b.py")],
+            "two": [event(0, "a.py"), event(1, "b.py"), event(2, "b.py")],
+        }
+    )
+
+    assert report.total_within_task_repeated_accesses == 2
+    assert report.within_task_repeated_files == {"a.py": 1, "b.py": 1}
+    assert report.repeated_file_tasks == {"a.py": 1, "b.py": 1}
+    assert report.file_task_counts == {"a.py": 2, "b.py": 2}
+    assert report.file_access_counts == {"a.py": 3, "b.py": 3}
+    assert report.thread_rows == [("one", 3, 1, 1), ("two", 3, 1, 1)]
+
+
+def test_workflow_recovery_classifies_move_after_failure(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "recovery", "--thread-id", "wf-thread"]) == 0
+
+    out = capsys.readouterr().out
+    assert "failure episodes: 1" in out
+    assert "patched / edited" in out
+    assert "healthy failure -> fix -> passing validation loops: 1" in out
+    assert "edit -> passing validation" in out
+
+
+def test_workflow_report_writes_markdown_and_redacts_paths(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    report = tmp_path / "workflow.md"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "report", "--thread-id", "wf-thread", "-o", str(report)]) == 0
+
+    assert "Wrote" in capsys.readouterr().out
+    text = report.read_text()
+    assert "# Codex Workflow Mining Report" in text
+    assert "## Recurring Agent Strategies" in text
+    assert "## Validation Habits" in text
+    assert "## Failure Recovery Patterns" in text
+    assert "/Users/person" not in text
+    assert "->" in text
+    assert "→" not in text
+    assert "…" not in text
+    assert "â" not in text
+
+
+def test_workflow_all_scope_is_explicit(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    assert main(["--db", str(db), "workflow", "strategies", "--all"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Workflow Strategies (all threads)" in out
+
+
+def test_workflow_recent_scope_selects_newest_threads(tmp_path, capsys):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        insert into logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, estimated_bytes)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1781000000,
+            1,
+            "INFO",
+            "codex_core::stream_events_utils",
+            'ToolCall: exec tools.exec_command({"cmd":"rg newest src/new.py"})',
+            "newest-thread",
+            "proc-new",
+            100,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    assert main(["--db", str(db), "workflow", "strategies", "--recent", "1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Workflow Strategies (1 most recent threads)" in out
+    assert "actions mined: 1" in out
+
+
+def test_workflow_since_days_is_relative_to_database_newest_row(tmp_path):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        insert into logs (ts, ts_nanos, level, target, feedback_log_body, thread_id, process_uuid, estimated_bytes)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (1781000000, 1, "INFO", "log", 'ToolCall: exec {"cmd":"rg newest"}', "newest", "p", 1),
+    )
+    conn.commit()
+
+    infos = cli.workflow_recent_thread_infos(conn, since_days=1)
+
+    assert [info.thread_id for info in infos] == ["newest"]
+    conn.close()
+
+
+def test_workflow_scope_flags_are_exclusive(tmp_path):
+    db = tmp_path / "logs.sqlite"
+    make_workflow_db(db)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "workflow", "strategies", "--all", "--thread-id", "wf-thread"])
+
+    assert str(exc_info.value) == "--all cannot be used with --thread-id."
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "workflow", "strategies", "--all", "--recent", "1"])
+
+    assert str(exc_info.value) == "--all cannot be used with --recent."
+
+
 def test_overview_runs(tmp_path, capsys):
     db = tmp_path / "logs.sqlite"
     make_db(db)
